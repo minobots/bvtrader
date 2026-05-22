@@ -18,7 +18,7 @@ export default function Portfolio() {
       fetch('/api/summary').then(r => r.json()).catch(() => null),
       fetch('/api/positions').then(r => r.json()).catch(() => null),
     ]).then(([s, p]) => {
-      if (s) setSummary(s);
+      if (s && s.totalValue !== undefined) setSummary(s);
       if (p && p.length > 0) setPositions(p);
     });
   }, []);
@@ -30,8 +30,9 @@ export default function Portfolio() {
     return acc;
   }, [] as { name: string; value: number }[]);
 
-  const totalGain = summary.totalValue + summary.cash - 50000;
-  const totalGainPct = (totalGain / 50000) * 100;
+  // Backend now provides totalGain/totalGainPct computed from real starting capital
+  const totalGain = summary.totalGain ?? (summary.totalValue - summary.startingCapital);
+  const totalGainPct = summary.totalGainPct ?? 0;
 
   return (
     <div className="page">
@@ -67,7 +68,7 @@ export default function Portfolio() {
             <LineChart data={[]}>
               <XAxis dataKey="date" tick={{ fontSize: 11 }} />
               <YAxis tick={{ fontSize: 11 }} domain={['auto', 'auto']} />
-              <Tooltip formatter={(v) => fmt(Number(v))} />
+              <Tooltip formatter={(v: number) => fmt(v)} />
               <Line type="monotone" dataKey="value" stroke="#4F46E5" strokeWidth={2} dot={false} />
             </LineChart>
           </ResponsiveContainer>
@@ -86,35 +87,41 @@ export default function Portfolio() {
       </div>
 
       <div className="card">
-        <h3>Holdings</h3>
+        <h2>Holdings</h2>
         <table className="data-table">
           <thead>
             <tr>
               <th>Symbol</th>
               <th>Name</th>
-              <th>Sector</th>
-              <th>Qty</th>
-              <th>Avg Cost</th>
-              <th>Price</th>
-              <th>Value</th>
+              <th>Shares</th>
+              <th>Avg Entry</th>
+              <th>Current</th>
+              <th>Market Value</th>
               <th>Gain/Loss</th>
             </tr>
           </thead>
           <tbody>
-            {positions.map(pos => (
-              <tr key={pos.symbol}>
-                <td className="sym">{pos.symbol}</td>
-                <td>{pos.name}</td>
-                <td>{pos.sector}</td>
-                <td>{pos.qty}</td>
-                <td>{fmt(pos.avgEntryPrice)}</td>
-                <td>{fmt(pos.currentPrice)}</td>
-                <td>{fmt(pos.marketValue)}</td>
-                <td className={pos.unrealizedPL >= 0 ? 'up' : 'down'}>
-                  {pos.unrealizedPL >= 0 ? '+' : ''}{fmt(pos.unrealizedPL)} ({pos.unrealizedPLPct.toFixed(2)}%)
+            {positions.length === 0 ? (
+              <tr>
+                <td colSpan={7} style={{ textAlign: 'center', color: '#6b7280' }}>
+                  No positions — paper account not yet deployed
                 </td>
               </tr>
-            ))}
+            ) : (
+              positions.map(pos => (
+                <tr key={pos.symbol}>
+                  <td className="sym">{pos.symbol}</td>
+                  <td>{pos.name}</td>
+                  <td>{pos.qty}</td>
+                  <td>{fmt(pos.avgEntryPrice)}</td>
+                  <td>{fmt(pos.currentPrice)}</td>
+                  <td>{fmt(pos.marketValue)}</td>
+                  <td className={pos.unrealizedPL >= 0 ? 'up' : 'down'}>
+                    {pos.unrealizedPL >= 0 ? '+' : ''}{fmt(pos.unrealizedPL)} ({pos.unrealizedPLPct.toFixed(2)}%)
+                  </td>
+                </tr>
+              ))
+            )}
           </tbody>
         </table>
       </div>

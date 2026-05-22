@@ -36,7 +36,7 @@ def get_calendar_context():
     weekday = now.weekday()
 
     in_earnings_season = any(m == month and s <= day <= e for m, s, e in EARNINGS_SEASONS)
-    in_fomc_week = any(m == month and (d - 2) <= day <= (d + 2) for m, d, e in FOMC_WINDOWS)
+    in_fomc_week = any(m == month and (e - 2) <= day <= (e + 1) for m, _, e in FOMC_WINDOWS)
     in_macro_week = any(m == month and s <= day <= e for m, s, e in ECON_RELEASE_WINDOWS)
     in_cpi_week = 8 <= day <= 14
     is_employment_friday = weekday == 4 and 1 <= day <= 14

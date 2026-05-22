@@ -40,8 +40,12 @@ export interface PortfolioSummary {
   totalValue: number;
   cash: number;
   equity: number;
+  lastEquity: number;
+  startingCapital: number;
   dayChange: number;
   dayChangePct: number;
+  totalGain: number;
+  totalGainPct: number;
 }
 
 export interface WatchlistItem {

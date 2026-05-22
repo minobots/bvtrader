@@ -110,8 +110,8 @@ def get_calendar_context():
 
     # ── Fed / FOMC ─────────────────────────────────────────────────────────
     in_fomc_week = any(
-        m == month and (d - 2) <= day <= (d + 2)
-        for m, d, _ in FOMC_WINDOWS
+        m == month and (e - 2) <= day <= (e + 1)
+        for m, _, e in FOMC_WINDOWS
     )
     # Days to nearest FOMC meeting
     days_to_fomc = 99

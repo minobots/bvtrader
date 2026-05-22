@@ -1,5 +1,5 @@
 
-import { mockRecommendations } from '../data/mockData';
+import { useState, useEffect } from 'react';
 import type { Recommendation } from '../types';
 
 const STRAT_LABELS = { 1: 'Fundamental', 2: 'Opportunistic', 3: 'Market Event', 4: 'Politically Aligned', 5: 'Quant Arbitrage' };
@@ -18,8 +18,8 @@ function RecCard({ rec }: { rec: Recommendation }) {
       <div className="rec-header">
         <div className="rec-left">
           <span className="rec-sym">{rec.symbol}</span>
-          <span className="rec-price">{rec.currentPrice}</span>
-          {rec.targetPrice && <span className="rec-target">→ {rec.targetPrice}</span>}
+          <span className="rec-price">${rec.currentPrice.toFixed(2)}</span>
+          {rec.targetPrice && <span className="rec-target">→ ${rec.targetPrice.toFixed(2)}</span>}
         </div>
         <div className="rec-action" style={{ color: style.color, background: style.bg }}>
           {rec.action}
@@ -36,6 +36,15 @@ function RecCard({ rec }: { rec: Recommendation }) {
 }
 
 export default function Analysis() {
+  const [recs, setRecs] = useState<Recommendation[]>([]);
+
+  useEffect(() => {
+    fetch('/recommendations')
+      .then(r => r.json())
+      .then(data => { if (data.length > 0) setRecs(data); })
+      .catch(() => {});
+  }, []);
+
   return (
     <div className="page">
       <h1>Analysis & Recommendations</h1>
@@ -46,7 +55,11 @@ export default function Analysis() {
         <button className="filter-btn active">All</button>
       </div>
       <div className="rec-list">
-        {mockRecommendations.map(rec => <RecCard key={rec.id} rec={rec} />)}
+        {recs.length === 0 ? (
+          <p style={{ color: '#6b7280', padding: '1rem' }}>No recommendations yet — run market_scan.py first</p>
+        ) : (
+          recs.map(rec => <RecCard key={rec.id} rec={rec} />)
+        )}
       </div>
     </div>
   );
