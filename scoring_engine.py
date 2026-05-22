@@ -1,6 +1,6 @@
 #!/usr/local/bin/python3
 """
-Quick Triage Scoring Engine — 25 metrics across 5 strategic rules
+Quick Triage Scoring Engine — 29 metrics across 7 strategic rules
 Each stock gets scored 0-100 per rule, then composite.
 
 Rule 1 (Fundamental): Quality, earnings power, balance sheet
@@ -8,6 +8,8 @@ Rule 2 (Opportunistic): Pullback depth, mean reversion, sector recovery
 Rule 3 (Market Event): Sector rotation, macro catalysts, policy
 Rule 4 (Political Alignment): Policy beneficiaries/risk, geopolitics
 Rule 5 (Quantitative): Trend, momentum, low vol, relative strength
+Rule 6 (Calendar/Temporal): Earnings season, FOMC week, CPI/jobs week, pension/quarter-end
+Rule 7 (Interest Rate Regime): 10Y yield level + direction, rate-sensitive sectors
 
 Usage:
   from scoring_engine import ScoreEngine
@@ -418,40 +420,322 @@ class ScoreEngine:
         rule5_total = sum(scores[k] * weights[k] for k in weights)
         return rule5_total, scores
 
-    # ── COMPOSITE SCORE ──────────────────────────────────────────────────────
-    def composite(self, r1, r2, r3, r4, r5):
+    # ── Rule 6: Calendar / Temporal Context ─────────────────────────────────────
+    def rule6(self, d, cal_ctx=None):
         """
-        Composite = weighted blend of 5 rules.
-        Conviction stocks (top 20): equal weight.
-        Library stocks: rule 1+5 weighted more (quality + trend).
+        Earnings season, FOMC week, CPI/jobs week, pension rebalance, year-end.
+        Modulates score based on current calendar windows and stock earnings sensitivity.
         """
+        if cal_ctx is None:
+            cal_ctx = self._get_calendar_context()
+
+        info = d["info"]
+        scores = {}
+        sector = (info.get("sector") or "").lower()
+        industry = (info.get("industry") or "").lower()
+        sym = (info.get("symbol") or "").upper()
+        beta = self._safe(info.get("beta"))
+        pe = self._safe(info.get("trailingPE"))
+
+        # Earnings exposure: high for tech/financials, low for staples/healthcare
+        high_earn_syms = ["NFLX", "AMZN", "GOOGL", "META", "NVDA", "AMD", "INTC",
+                          "BAC", "JPM", "GS", "C", "MS", "XLF", "XLK"]
+        earn_exposure = 0.5
+        if sym in high_earn_syms or any(k in industry for k in ["technology", "semiconductor", "cloud", "bank", "financial"]):
+            earn_exposure = 1.0
+        elif sector in ["consumer discretionary", "information technology",
+                        "financials", "communication services"]:
+            earn_exposure = 0.7
+        elif sector in ["healthcare", "industrials", "consumer staples"]:
+            earn_exposure = 0.4
+
+        # t1: Earnings season scoring
+        if cal_ctx.get("in_earnings_season"):
+            days_into = cal_ctx.get("days_into_earnings", 0)
+            earn_penalty = earn_exposure * days_into * 0.8
+            scores["t1"] = max(0, 70 - earn_penalty)
+        else:
+            scores["t1"] = 75
+
+        # t2: FOMC week scoring — penalize high beta
+        if cal_ctx.get("in_fomc_week"):
+            if beta and beta > 0:
+                scores["t2"] = max(20, 75 - (beta - 1.0) * 40)
+            else:
+                scores["t2"] = 65
+        elif cal_ctx.get("fomc_risk", 0) > 0:
+            scores["t2"] = 70 - cal_ctx["fomc_risk"] * 15
+        else:
+            scores["t2"] = 75
+
+        # t3: CPI / Jobs week scoring
+        if cal_ctx.get("in_cpi_week") or cal_ctx.get("is_employment_friday"):
+            macro_sensitive = ["XLU", "VNQ", "XLP", "VYM", "DVY", "GLD", "IAU"]
+            if sym in macro_sensitive or sector in ["utilities", "real estate", "consumer staples"]:
+                scores["t3"] = 80
+            elif sector in ["technology", "consumer discretionary"]:
+                pressure = cal_ctx.get("calendar_pressure", 0)
+                scores["t3"] = max(40, 65 - pressure * 20)
+            else:
+                scores["t3"] = 65
+        else:
+            scores["t3"] = 70
+
+        # t4: Pension rebalance / Quarter-end
+        if cal_ctx.get("in_pension_rebalance") or cal_ctx.get("is_quarter_end"):
+            avg_vol = self._safe(info.get("averageVolume"))
+            if avg_vol and avg_vol > 5e6:
+                scores["t4"] = 80
+            elif beta and beta < 0.9:
+                scores["t4"] = 75
+            else:
+                scores["t4"] = 55
+        else:
+            scores["t4"] = 68
+
+        # t5: Year-end / January effect
+        if cal_ctx.get("is_year_end"):
+            mcap = self._safe(info.get("marketCap"))
+            if mcap and mcap < 5e9:
+                scores["t5"] = 80
+            elif sector in ["small cap", "mid cap"]:
+                scores["t5"] = 78
+            else:
+                scores["t5"] = 65
+        elif cal_ctx.get("is_january"):
+            scores["t5"] = 75
+        else:
+            scores["t5"] = 65
+
+        weights = {"t1": 0.20, "t2": 0.22, "t3": 0.18, "t4": 0.15, "t5": 0.25}
+        return sum(scores[k] * weights[k] for k in weights), scores
+
+    # ── Rule 7: Interest Rate Regime ─────────────────────────────────────────────
+    def rule7(self, d, fed_regime=None):
+        """
+        10Y Treasury yield level + direction. Modulates score based on:
+        - VERY_TIGHT (>5.0%): penalize high-P/E growth, reward value
+        - RESTRICTIVE (4.5–5.0%): banks benefit, long-duration growth hurt
+        - NEUTRAL (3.5–4.5%): balanced
+        - ACCOMMODATIVE (<3.5%): growth stocks re-rate higher, REITs/utilities boosted
+        """
+        if fed_regime is None:
+            fed_regime = self._get_fed_regime()
+
+        info = d["info"]
+        scores = {}
+        sym = (info.get("symbol") or "").upper()
+        pe = self._safe(info.get("trailingPE"))
+        beta = self._safe(info.get("beta"))
+        sector = (info.get("sector") or "").lower()
+
+        ten_yr = fed_regime.get("ten_year")
+        regime = fed_regime.get("regime", "NEUTRAL")
+        rate_dir = fed_regime.get("rate_direction", "STABLE")
+
+        if ten_yr:
+            if "VERY_TIGHT" in regime or "RESTRICTIVE" in regime:
+                if pe and pe > 30:
+                    scores["t6"] = max(30, 75 - (pe - 30) * 1.5)
+                elif pe and pe < 20:
+                    scores["t6"] = 80  # value scores well
+                else:
+                    scores["t6"] = 65
+                # Banks get boost from steep yield curve
+                bank_syms = ["BAC", "JPM", "GS", "C", "MS", "KEY", "MTB", "USB", "TFC"]
+                if sym in bank_syms:
+                    scores["t6"] = 88
+                # REITs/utilities penalized
+                rate_sens = ["VNQ", "XLRE", "IYR", "XLU"]
+                if sym in rate_sens:
+                    scores["t6"] = max(25, scores["t6"] - 25)
+            elif "ACCOMMODATIVE" in regime:
+                if pe and pe > 25:
+                    scores["t6"] = 80
+                elif sym in ["VNQ", "XLRE", "IYR", "XLU"]:
+                    scores["t6"] = 85
+                else:
+                    scores["t6"] = 68
+            else:
+                scores["t6"] = 70
+        else:
+            scores["t6"] = 68
+
+        # t7: Rate direction (rising/falling yields)
+        if rate_dir == "RISING":
+            if beta and beta > 1.2:
+                scores["t7"] = max(30, 70 - (beta - 1.0) * 30)
+            else:
+                scores["t7"] = 68
+        elif rate_dir == "FALLING":
+            if pe and pe > 20:
+                scores["t7"] = 78  # falling yields = growth re-rates
+            else:
+                scores["t7"] = 65
+        else:
+            scores["t7"] = 65
+
+        weights = {"t6": 0.55, "t7": 0.45}
+        return sum(scores[k] * weights[k] for k in weights), scores
+
+    def _get_calendar_context(self):
+        """Compute current calendar context (earnings/FOMC/macro windows)."""
+        from datetime import datetime
+        now = datetime.now()
+        month, day, weekday = now.month, now.day, now.weekday()
+
+        FOMC_WINDOWS = [
+            (1, 28, 31), (3, 17, 20), (5, 5, 8), (6, 16, 19),
+            (7, 28, 31), (9, 16, 19), (10, 6, 9), (12, 15, 18),
+        ]
+        EARNINGS_SEASONS = [
+            (1, 8, 21), (4, 8, 21), (7, 8, 21), (10, 8, 21),
+        ]
+        ECON_RELEASE_WINDOWS = [(m, 5, 12) for m in range(1, 13)]
+
+        in_earnings_season = any(m == month and s <= day <= e for m, s, e in EARNINGS_SEASONS)
+        in_fomc_week = any(m == month and (e - 2) <= day <= (e + 1) for m, _, e in FOMC_WINDOWS)
+        in_macro_week = any(m == month and s <= day <= e for m, s, e in ECON_RELEASE_WINDOWS)
+        in_cpi_week = 8 <= day <= 14
+        is_employment_friday = weekday == 4 and 1 <= day <= 14
+        in_pension_rebalance = day >= 25 and weekday < 5
+        is_quarter_end = month in [3, 6, 9, 12] and day >= 25
+        is_year_end = month == 12 and day >= 20
+        is_january = month == 1
+
+        pressure = 0.0
+        if in_earnings_season: pressure += 0.25
+        if in_fomc_week: pressure += 0.30
+        if in_macro_week: pressure += 0.15
+        if in_pension_rebalance: pressure += 0.10
+        if is_year_end: pressure += 0.15
+        if is_quarter_end: pressure += 0.05
+
+        days_into_earnings = 0
+        for m, s, e in EARNINGS_SEASONS:
+            if m == month and s <= day <= e:
+                days_into_earnings = day - s
+
+        # FOMC risk: how many days to next meeting
+        fomc_risk = 0
+        for m, d, e in FOMC_WINDOWS:
+            if m == month:
+                dist = d - day
+                if 0 <= dist <= 14:
+                    fomc_risk = 1 - (dist / 14)
+
         return {
-            "composite_score": r1 * 0.22 + r2 * 0.18 + r3 * 0.15 + r4 * 0.10 + r5 * 0.35,
+            "in_earnings_season": in_earnings_season,
+            "in_fomc_week": in_fomc_week,
+            "in_macro_week": in_macro_week,
+            "in_cpi_week": in_cpi_week,
+            "is_employment_friday": is_employment_friday,
+            "in_pension_rebalance": in_pension_rebalance,
+            "is_quarter_end": is_quarter_end,
+            "is_year_end": is_year_end,
+            "is_january": is_january,
+            "calendar_pressure": min(1.0, pressure),
+            "days_into_earnings": days_into_earnings,
+            "fomc_risk": fomc_risk,
+        }
+
+    def _get_fed_regime(self):
+        """Fetch current 10Y Treasury yield and determine rate regime + direction."""
+        try:
+            import yfinance as yf
+            fi_10 = yf.Ticker("^TNX").fast_info
+            ten_yr = getattr(fi_10, "last_price", None)
+        except Exception:
+            ten_yr = None
+
+        rate_data = {"ten_year": None, "regime": "NEUTRAL", "rate_direction": "STABLE"}
+
+        if ten_yr:
+            rate_data["ten_year"] = round(float(ten_yr), 3)
+            if ten_yr > 5.0:
+                rate_data["regime"] = "VERY_TIGHT"
+            elif ten_yr > 4.5:
+                rate_data["regime"] = "RESTRICTIVE"
+            elif ten_yr > 3.5:
+                rate_data["regime"] = "NEUTRAL"
+            else:
+                rate_data["regime"] = "ACCOMMODATIVE"
+
+            try:
+                t = yf.Ticker("^TNX")
+                hist = t.history(period="1mo", interval="1d")
+                if hist is not None and len(hist) >= 5:
+                    ma30 = hist["Close"].mean()
+                    if ten_yr > ma30 * 1.01:
+                        rate_data["rate_direction"] = "RISING"
+                    elif ten_yr < ma30 * 0.99:
+                        rate_data["rate_direction"] = "FALLING"
+                    else:
+                        rate_data["rate_direction"] = "STABLE"
+            except Exception:
+                pass
+
+        return rate_data
+
+    # ── COMPOSITE SCORE ──────────────────────────────────────────────────────
+    def composite(self, r1, r2, r3, r4, r5, r6, r7, cal_ctx=None, fed_regime=None):
+        """
+        Composite = weighted blend of 7 rules.
+        Calendar pressure compresses scores toward 50 during high-vol windows.
+        VERY_TIGHT/RESTRICTIVE regimes apply additional compression on growth stocks.
+        """
+        if cal_ctx is None:
+            cal_ctx = self._get_calendar_context()
+        if fed_regime is None:
+            fed_regime = self._get_fed_regime()
+
+        base = r1 * 0.20 + r2 * 0.16 + r3 * 0.12 + r4 * 0.08 + r5 * 0.28 + r6 * 0.10 + r7 * 0.06
+
+        midpoint = 50
+        pressure = cal_ctx.get("calendar_pressure", 0)
+        if pressure > 0:
+            compression = min(0.12, pressure * 0.20)
+            base = midpoint + (base - midpoint) * (1.0 - compression)
+
+        regime = fed_regime.get("regime", "NEUTRAL")
+        if "VERY_TIGHT" in regime:
+            base = midpoint + (base - midpoint) * 0.92
+        elif "RESTRICTIVE" in regime:
+            base = midpoint + (base - midpoint) * 0.96
+
+        return {
+            "composite_score": base,
             "rule1": round(r1, 1),
             "rule2": round(r2, 1),
             "rule3": round(r3, 1),
             "rule4": round(r4, 1),
             "rule5": round(r5, 1),
+            "rule6": round(r6, 1),
+            "rule7": round(r7, 1),
         }
 
     def score(self, symbol, tier="quick"):
-        """Score a single stock. Returns dict with all scores."""
+        """Score a single stock across all 7 rules. Returns dict with all scores."""
         d = self._get_ticker(symbol)
         if "error" in d and d["error"]:
             return {"symbol": symbol, "error": d["error"]}
+
+        cal_ctx = self._get_calendar_context()
+        fed_regime = self._get_fed_regime()
 
         r1, r1_detail = self.rule1(d)
         r2, r2_detail = self.rule2(d)
         r3, r3_detail = self.rule3(d)
         r4, r4_detail = self.rule4(d)
         r5, r5_detail = self.rule5(d)
-        comp = self.composite(r1, r2, r3, r4, r5)
+        r6, r6_detail = self.rule6(d, cal_ctx)
+        r7, r7_detail = self.rule7(d, fed_regime)
+        comp = self.composite(r1, r2, r3, r4, r5, r6, r7, cal_ctx, fed_regime)
 
         info = d["info"]
         cp = self._safe(info.get("currentPrice"))
         high52 = self._safe(info.get("fiftyTwoWeekHigh"))
 
-        # Scan status: BUY if composite >= 60, HOLD if >= 40, AVOID if < 40
         cs = comp["composite_score"]
         if cs >= 65:
             status = "buy"
@@ -464,36 +748,52 @@ class ScoreEngine:
             "symbol": symbol,
             "tier": tier,
             "score_date": time.strftime("%Y-%m-%d"),
+            # Rule 1
             "f_rule1总分": round(r1, 1),
             "f_earning_quality": r1_detail.get("f1"),
             "f_growth_rate": r1_detail.get("f2"),
             "f_balance_sheet": r1_detail.get("f3"),
             "f_market_position": r1_detail.get("f4"),
             "f_profitability": r1_detail.get("f5"),
+            # Rule 2
             "o_rule2总分": round(r2, 1),
             "o_pullback_depth": r2_detail.get("o1"),
             "o_mean_reversion": r2_detail.get("o2"),
             "o_sector_recovery": r2_detail.get("o3"),
             "o_sentiment_turn": r2_detail.get("o4"),
             "o_value_distance": r2_detail.get("o5"),
+            # Rule 3
             "m_rule3总分": round(r3, 1),
             "m_sector_rotation": r3_detail.get("m1"),
             "m_macro_tailwind": r3_detail.get("m2"),
             "m_policy_benefit": r3_detail.get("m3"),
             "m_feed_flows": r3_detail.get("m4"),
             "m_market_cap": r3_detail.get("m5"),
+            # Rule 4
             "p_rule4总分": round(r4, 1),
             "p_policy_exposure": r4_detail.get("p1"),
             "p_regulatory_risk": r4_detail.get("p2"),
             "p_subsidy_benefit": r4_detail.get("p3"),
             "p_trade_exposure": r4_detail.get("p4"),
             "p_geopolitical": r4_detail.get("p5"),
+            # Rule 5
             "q_rule5总分": round(r5, 1),
             "q_trend_score": r5_detail.get("q1"),
             "q_momentum": r5_detail.get("q2"),
             "q_low_volatility": r5_detail.get("q3"),
             "q_relative_strength": r5_detail.get("q4"),
             "q_vol_profile": r5_detail.get("q5"),
+            # Rule 6
+            "t_rule6总分": round(r6, 1),
+            "t_earnings_season": r6_detail.get("t1"),
+            "t_fomc_week": r6_detail.get("t2"),
+            "t_cpi_jobs": r6_detail.get("t3"),
+            "t_pension_rebalance": r6_detail.get("t4"),
+            "t_year_end": r6_detail.get("t5"),
+            # Rule 7
+            "i_rule7总分": round(r7, 1),
+            "i_rate_regime": r7_detail.get("t6"),
+            "i_rate_direction": r7_detail.get("t7"),
             **comp,
             "scan_status": status,
             "current_price": cp,
