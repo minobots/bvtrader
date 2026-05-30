@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react';
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend } from 'recharts';
 import { mockPortfolio, mockPositions } from '../data/mockData';
 import type { PortfolioSummary, Position } from '../types';
 
-const SECTOR_COLORS = ['#4F46E5', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899'];
+const SECTOR_COLORS = ['#6366f1', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#f97316'];
 
 function fmt(n: number) {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
@@ -14,13 +14,16 @@ export default function Portfolio() {
   const [positions, setPositions] = useState<Position[]>(mockPositions);
 
   useEffect(() => {
-    Promise.all([
+    const load = () => Promise.all([
       fetch('/api/summary').then(r => r.json()).catch(() => null),
       fetch('/api/positions').then(r => r.json()).catch(() => null),
     ]).then(([s, p]) => {
       if (s && s.totalValue !== undefined) setSummary(s);
       if (p && p.length > 0) setPositions(p);
     });
+    load();
+    const id = setInterval(load, 60000);
+    return () => clearInterval(id);
   }, []);
 
   const sectorData = positions.reduce((acc, pos) => {
@@ -30,9 +33,10 @@ export default function Portfolio() {
     return acc;
   }, [] as { name: string; value: number }[]);
 
-  // Backend now provides totalGain/totalGainPct computed from real starting capital
   const totalGain = summary.totalGain ?? (summary.totalValue - summary.startingCapital);
   const totalGainPct = summary.totalGainPct ?? 0;
+
+  const allocData = positions.map(p => ({ name: p.symbol, value: p.marketValue }));
 
   return (
     <div className="page">
@@ -63,26 +67,34 @@ export default function Portfolio() {
 
       <div className="charts-row">
         <div className="card chart-card">
-          <h3>Performance</h3>
-          <ResponsiveContainer width="100%" height={220}>
-            <LineChart data={[]}>
-              <XAxis dataKey="date" tick={{ fontSize: 11 }} />
-              <YAxis tick={{ fontSize: 11 }} domain={['auto', 'auto']} />
-              <Tooltip formatter={(v: number) => fmt(v)} />
-              <Line type="monotone" dataKey="value" stroke="#4F46E5" strokeWidth={2} dot={false} />
-            </LineChart>
-          </ResponsiveContainer>
+          <h3>Position Allocation</h3>
+          {allocData.length === 0 ? (
+            <div style={{ color: 'var(--text-muted)', textAlign: 'center', padding: '2rem' }}>No positions — paper account not yet deployed</div>
+          ) : (
+            <ResponsiveContainer width="100%" height={240}>
+              <BarChart data={allocData} layout="vertical" margin={{ left: 10, right: 20, top: 5, bottom: 5 }}>
+                <XAxis type="number" tick={{ fontSize: 10, fill: 'var(--text-muted)' }} tickFormatter={v => `$${(((v as number)||0)/1000).toFixed(0)}k`} axisLine={{ stroke: 'var(--border)' }} tickLine={false} />
+                <YAxis type="category" dataKey="name" tick={{ fontSize: 11, fill: 'var(--text-secondary)', fontFamily: 'JetBrains Mono, monospace' }} width={50} axisLine={false} tickLine={false} />
+                <Tooltip />
+                <Bar dataKey="value" fill="#6366f1" radius={[0, 4, 4, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
         </div>
         <div className="card chart-card">
-          <h3>Allocation</h3>
-          <ResponsiveContainer width="100%" height={220}>
-            <PieChart>
-              <Pie data={sectorData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} label={({ name }) => name}>
-                {sectorData.map((_, i) => <Cell key={i} fill={SECTOR_COLORS[i % SECTOR_COLORS.length]} />)}
-              </Pie>
-              <Legend />
-            </PieChart>
-          </ResponsiveContainer>
+          <h3>Sector Breakdown</h3>
+          {sectorData.length === 0 ? (
+            <div style={{ color: 'var(--text-muted)', textAlign: 'center', padding: '2rem' }}>No positions</div>
+          ) : (
+            <ResponsiveContainer width="100%" height={240}>
+              <PieChart>
+                <Pie data={sectorData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} innerRadius={45} label={({ name, percent }) => `${name} ${((percent ?? 0) * 100).toFixed(0)}%`}>
+                  {sectorData.map((_, i) => <Cell key={i} fill={SECTOR_COLORS[i % SECTOR_COLORS.length]} />)}
+                </Pie>
+                <Legend />
+              </PieChart>
+            </ResponsiveContainer>
+          )}
         </div>
       </div>
 
@@ -103,7 +115,7 @@ export default function Portfolio() {
           <tbody>
             {positions.length === 0 ? (
               <tr>
-                <td colSpan={7} style={{ textAlign: 'center', color: '#6b7280' }}>
+                <td colSpan={7} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
                   No positions — paper account not yet deployed
                 </td>
               </tr>
@@ -115,7 +127,7 @@ export default function Portfolio() {
                   <td>{pos.qty}</td>
                   <td>{fmt(pos.avgEntryPrice)}</td>
                   <td>{fmt(pos.currentPrice)}</td>
-                  <td>{fmt(pos.marketValue)}</td>
+                  <td style={{ fontWeight: 600, color: 'var(--text)' }}>{fmt(pos.marketValue)}</td>
                   <td className={pos.unrealizedPL >= 0 ? 'up' : 'down'}>
                     {pos.unrealizedPL >= 0 ? '+' : ''}{fmt(pos.unrealizedPL)} ({pos.unrealizedPLPct.toFixed(2)}%)
                   </td>

@@ -2,17 +2,16 @@ import { TrendingUp, BarChart3, CheckCircle, Eye, BookOpen } from 'lucide-react'
 import type { Page } from '../App';
 
 const navItems: { id: Page; label: string; icon: React.ReactNode }[] = [
-  { id: 'portfolio', label: 'Portfolio', icon: <TrendingUp size={18} /> },
-  { id: 'analysis',  label: 'Analysis',  icon: <BarChart3 size={18} /> },
-  { id: 'approvals', label: 'Approvals', icon: <CheckCircle size={18} /> },
-  { id: 'market',    label: 'Watch',     icon: <Eye size={18} /> },
-  { id: 'library',   label: 'Library',   icon: <BookOpen size={18} /> },
+  { id: 'portfolio', label: 'Portfolio', icon: <TrendingUp size={16} /> },
+  { id: 'analysis',  label: 'Analysis',  icon: <BarChart3 size={16} /> },
+  { id: 'approvals', label: 'Approvals', icon: <CheckCircle size={16} /> },
+  { id: 'market',    label: 'Watch',     icon: <Eye size={16} /> },
+  { id: 'library',   label: 'Library',   icon: <BookOpen size={16} /> },
 ];
 
 export default function Nav({ current, onNavigate }: { current: Page; onNavigate: (p: Page) => void }) {
   return (
     <nav className="nav">
-      <div className="nav-brand">Wealth</div>
       <div className="nav-links">
         {navItems.map(item => (
           <button

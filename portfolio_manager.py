@@ -269,35 +269,58 @@ class ScoreEngine:
             return self._cache[symbol]
         try:
             import yfinance as yf
-            t = yf.Ticker(symbol)
-            info = t.info or {}
+            import signal
 
-            # ETF-specific: use fast_info for reliable price data
-            try:
-                fi = t.fast_info
-                info["currentPrice"] = getattr(fi, "market_cap", None) or info.get("currentPrice")
-                # For ETFs, lastPrice is more reliable
-                if not info.get("currentPrice") and hasattr(fi, "last_price"):
-                    info["currentPrice"] = fi.last_price
-            except:
+            # ── Timeout wrapper for yfinance calls (max 12s per ticker) ──
+            class TimeoutError(Exception):
                 pass
 
-            # Get history carefully (may fail for some tickers)
-            try:
-                hist = t.history(period="3mo", interval="1d")
-            except:
-                hist = None
+            def _timeout_handler(signum, frame):
+                raise TimeoutError(f"yfinance timeout for {symbol}")
+
+            # Use signal-based timeout on Unix; skip timeout on other platforms
+            timeout_secs = 12
+            old_handler = None
+            if hasattr(signal, 'SIGALRM'):
+                old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+                signal.alarm(timeout_secs)
 
             try:
-                financials = t.financials
-                balance = t.balance_sheet
-                cashflow = t.cashflow
-            except:
-                financials = balance = cashflow = None
+                t = yf.Ticker(symbol)
+                info = t.info or {}
+
+                # ETF-specific: use fast_info for reliable price data
+                try:
+                    fi = t.fast_info
+                    info["currentPrice"] = getattr(fi, "market_cap", None) or info.get("currentPrice")
+                    if not info.get("currentPrice") and hasattr(fi, "last_price"):
+                        info["currentPrice"] = fi.last_price
+                except:
+                    pass
+
+                # Get history carefully (may fail for some tickers)
+                try:
+                    hist = t.history(period="3mo", interval="1d")
+                except:
+                    hist = None
+
+                try:
+                    financials = t.financials
+                    balance = t.balance_sheet
+                    cashflow = t.cashflow
+                except:
+                    financials = balance = cashflow = None
+
+            finally:
+                if old_handler is not None and hasattr(signal, 'SIGALRM'):
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, old_handler)
 
             self._cache[symbol] = {"info": info, "hist": hist,
                                    "fin": financials, "bal": balance, "cf": cashflow}
             return self._cache[symbol]
+        except TimeoutError as e:
+            return {"info": {}, "hist": None, "fin": None, "bal": None, "cf": None, "error": f"timeout: {e}"}
         except Exception as e:
             return {"info": {}, "hist": None, "fin": None, "bal": None, "cf": None, "error": str(e)}
 
@@ -963,9 +986,9 @@ def check_signals():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LIBRARY BUILDER — 10 stocks/day
+# LIBRARY BUILDER — bulk scoring (no daily limit)
 # ─────────────────────────────────────────────────────────────────────────────
-DAILY_BUILD_COUNT = 10
+DAILY_BUILD_COUNT = 80  # 80 × ~2s = ~160s max (fits cron 120s timeout with margin)
 
 def build_library():
     """

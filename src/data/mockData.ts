@@ -4,8 +4,12 @@ export const mockPortfolio: PortfolioSummary = {
   totalValue: 52480.22,
   cash: 8420.00,
   equity: 44060.22,
+  lastEquity: 52167.77,
+  startingCapital: 50000,
   dayChange: 312.45,
   dayChangePct: 0.60,
+  totalGain: 2480.22,
+  totalGainPct: 4.96,
 };
 
 export const mockPositions: Position[] = [
