@@ -17,6 +17,29 @@ HEADERS = {"APCA-API-KEY-ID": API_KEY, "APCA-API-SECRET-KEY": API_SECRET}
 WATCHLIST = ["AAPL", "GOOGL", "QQQ", "V", "XLE", "SOXX", "KO", "CVX", "LLY",
              "INTC", "SPY", "NVDA", "AMZN", "META", "MSFT"]
 
+# ── DB path for signals ──────────────────────────────────────────────────────
+DB_PATH = os.path.expanduser("~/.hermes/cron/output/wealth/portfolio.db")
+
+def get_db_signals(min_score=60, limit=20):
+    """Fetch active BUY signals from portfolio DB scored by portfolio_manager."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT symbol, score_before, score_after, price_at_signal, target_price
+            FROM signals
+            WHERE status='active'
+              AND signal_type='buy'
+              AND (score_before >= ? OR score_after >= ?)
+            ORDER BY COALESCE(score_after, score_before) DESC
+            LIMIT ?
+        """, (min_score, min_score, limit))
+        rows = cur.fetchall()
+        conn.close()
+        return [{"symbol": r[0], "db_score": r[1] or r[2], "entry_price": r[3], "target": r[4]} for r in rows]
+    except Exception as e:
+        return []
+
 # ── Calendar / Fed Engine (same as market_scan.py) ───────────────────────────
 FOMC_WINDOWS = [
     (1,28,31),(3,17,20),(5,5,8),(6,16,19),
@@ -396,6 +419,30 @@ def run_trade_cycle():
         if "error" in q: continue
         score, signals = score_stock(q, CAL_CTX, FED_REGIME)
         scored.append({**q, "score": score, "signals": signals})
+
+    # ── Step 2b: Merge ETF/crypto BUY signals from portfolio DB ─────────────────
+    db_signals = get_db_signals(min_score=60, limit=20)
+    if db_signals:
+        db_syms = {s["symbol"] for s in db_signals}
+        already_scored = {s["symbol"] for s in scored}
+        new_syms = db_syms - already_scored
+        if new_syms:
+            log.append(f"\n📊 Fetching {len(new_syms)} DB signals not in WATCHLIST: {', '.join(sorted(new_syms))}")
+        for sig in db_signals:
+            sym = sig["symbol"]
+            if sym in already_scored:
+                continue  # already scored via WATCHLIST
+            q = fetch_quote(sym)
+            if q and "error" not in q:
+                score, signals = score_stock(q, CAL_CTX, FED_REGIME)
+                # Apply DB signal score as a multiplier so portfolio_manager conviction feeds through
+                db_boost = sig["db_score"] / 100.0
+                score = score * db_boost
+                scored.append({**q, "score": score, "signals": signals + [f"📈 DB signal score={sig['db_score']:.0f}"]})
+                time.sleep(0.15)
+            else:
+                log.append(f"  ⚠️ {sym} in DB signals but no quote available")
+
     scored.sort(key=lambda x: x["score"], reverse=True)
 
     buy_candidates  = [s for s in scored if s["score"]>=1.0]
