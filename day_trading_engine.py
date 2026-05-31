@@ -57,10 +57,10 @@ TRADING_PAIRS = [
 # Risk parameters
 MAX_DAILY_LOSS_PCT = 2.0       # Stop trading after -2% daily loss
 MAX_RISK_PER_TRADE_PCT = 0.5   # Max 0.5% portfolio risk per trade
-STOP_LOSS_PCT = 0.8            # 0.8% stop loss
-TAKE_PROFIT_PCT = 1.2          # 1.2% take profit (1.5:1 R:R)
-TRAILING_STOP_TRIGGER_PCT = 0.6# Activate trailing stop at +0.6%
-TRAILING_STOP_DISTANCE_PCT = 0.4 # Trail 0.4% behind high
+STOP_LOSS_PCT = 2.0            # 2.0% stop loss — crypto is volatile, need room
+TAKE_PROFIT_PCT = 4.0          # 4.0% take profit — let winners run (2:1 R:R)
+TRAILING_STOP_TRIGGER_PCT = 1.5# Activate trailing stop only after +1.5% profit
+TRAILING_STOP_DISTANCE_PCT = 1.0 # Trail 1.0% behind high
 MAX_CONCURRENT_POSITIONS = 3   # Max open positions at once
 
 # Strategy weights (for signal confidence)
@@ -911,13 +911,13 @@ def monitor_open_positions():
         # Check stop loss
         if side == "buy" and current_price <= sl:
             print(f"  🛑 STOP LOSS: {symbol} @ ${current_price:.2f} (entry: ${entry:.2f}, SL: ${sl:.2f})")
-            # Close position
+            # Close position — try both symbol formats Alpaca returns (ETHUSD vs ETH/USD)
             alpaca_positions = get_open_positions()
             for p in alpaca_positions:
-                if p["symbol"] == f"{symbol}/USD":
+                # Alpaca returns crypto symbols as ETHUSD, LINKUSD, SOLUSD (no slash)
+                if p["symbol"].replace("/", "") == f"{symbol}USD":
                     qty = float(p["qty"])
-                    result = place_crypto_order(symbol, "sell", 0, "market")
-                    # Actually sell the full quantity
+                    # Use qty-based market sell (not notional=0)
                     result = alpaca_request("POST", "/v2/orders", {
                         "symbol": f"{symbol}/USD",
                         "qty": str(qty),
@@ -938,7 +938,8 @@ def monitor_open_positions():
             print(f"  🎯 TAKE PROFIT: {symbol} @ ${current_price:.2f} (entry: ${entry:.2f}, TP: ${tp:.2f})")
             alpaca_positions = get_open_positions()
             for p in alpaca_positions:
-                if p["symbol"] == f"{symbol}/USD":
+                # Alpaca returns crypto symbols as ETHUSD, LINKUSD, SOLUSD (no slash)
+                if p["symbol"].replace("/", "") == f"{symbol}USD":
                     qty = float(p["qty"])
                     result = alpaca_request("POST", "/v2/orders", {
                         "symbol": f"{symbol}/USD",
@@ -1144,6 +1145,13 @@ def run_day_trading_scan(execute_trades=False):
 
         if signal != "none":
             print(f"→ {signal.upper()} (confidence: {confidence:.2f}, price: ${current_price:,.2f})")
+
+            # Suppress new BUY signals if already at max concurrent positions
+            if signal == "buy":
+                open_trades = get_open_day_trades()
+                if len(open_trades) >= MAX_CONCURRENT_POSITIONS:
+                    print(f"  ⛔ At max concurrent positions ({MAX_CONCURRENT_POSITIONS}), skipping {symbol}")
+                    continue
 
             # Update intraday score in BV Trader system
             update_intraday_score(symbol, signal, confidence)
