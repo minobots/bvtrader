@@ -5,7 +5,7 @@ Hourly execution during trading hours (9:30 AM–4 PM ET, Mon–Fri)
 Uses scoring engine to generate signals, executes via Alpaca paper API.
 """
 import os, sys, json, time, requests, sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # ── Alpaca Config ────────────────────────────────────────────────────────────
 API_KEY = os.environ.get("ALPACA_API_KEY", "PKYBN34XEJMJA46ZVPNIALRKIP")
@@ -288,7 +288,8 @@ def score_stock(q, cal_ctx=None, fed_regime=None):
 
         # Quantitative rules
         if pct_from_high>=-3:  score+=1.0; signals.append(f"within 3% of 52w high (${cp:.2f})")
-        elif pct_from_low>=40: score+=0.5; signals.append(f"+{pct_from_low:.0f}% above 52w low")
+        elif pct_from_low>=80: score-=0.5; signals.append(f"{pct_from_low:.0f}% above 52w low — OVERBOUGHT, penalised")
+        elif pct_from_low>=40: signals.append(f"{pct_from_low:.0f}% above 52w low — near range, no score boost")
 
         if abs(chg_day)<1.5 and pct_from_high>-5:
             score+=0.5; signals.append("low vol / defensive positioning")
@@ -362,6 +363,22 @@ def calc_position_size(account, price, max_pct=0.10):
     if qty * price < 100:
         qty = max(1, int(100 / price))
     return qty
+
+# ── Re-entry Cooldown ─────────────────────────────────────────────────────────
+_COOLDOWN_DAYS = 5  # skip BUY if symbol was sold within last 5 trading days
+
+def _get_recent_sells():
+    """Return set of symbols sold within _COOLDOWN_DAYS trading days via Alpaca."""
+    try:
+        since = (datetime.now() - timedelta(days=_COOLDOWN_DAYS+2)).strftime("%Y-%m-%d")
+        url = f"https://paper-api.alpaca.markets/v2/orders?status=filled&after={since}&limit=100"
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        if resp.status_code != 200:
+            return set()
+        orders = resp.json()
+        return {o["symbol"] for o in orders if o.get("side") == "sell" and o.get("status") == "filled"}
+    except Exception:
+        return set()
 
 # ── Core Trading Logic ────────────────────────────────────────────────────────
 MAX_POSITIONS = 20      # max open positions
@@ -564,12 +581,17 @@ def run_trade_cycle():
     slots_available = MAX_POSITIONS - len(positions) - len(pending_buys)
 
     log.append(f"  Slots available: {slots_available} (max {MAX_POSITIONS} positions, {len(positions)} open, {len(pending_buys)} pending)")
+    log.append(f"  Slots available: {slots_available} (max {MAX_POSITIONS} positions, {len(positions)} open, {len(pending_buys)} pending)")
 
     if slots_available <= 0:
         log.append("  ⏭️ Max positions reached — no new entries")
     else:
+        # Fetch recently sold symbols — block re-entry for cooldown period
+        recently_sold = _get_recent_sells()
+        if recently_sold:
+            log.append(f"  🛡️ Cooldown: {len(recently_sold)} symbols blocked from buy: {sorted(recently_sold)}")
+
         new_buys = 0
-        # Collect all positive scores for weighted allocation
         scored_symbols = [s for s in scored if s["score"] > 0]
         all_scores = [s["score"] for s in scored_symbols]
         total_score = sum(all_scores)
@@ -579,12 +601,12 @@ def run_trade_cycle():
                 break
             sym = cand["symbol"]
             if sym in open_syms or sym in pending_buys:
-                log.append(f"  ⏭️ {sym} already have/pending — skipped")
-                continue
+                log.append(f"  ⏭️ {sym} already have/pending — skipped"); continue
+            if sym in recently_sold:
+                log.append(f"  ⛔ {sym} sold recently — cooldown block, skipped"); continue
             if cand["currentPrice"] == 0:
                 log.append(f"  ⏭️ {sym} no price data — skipped"); continue
 
-            # Weighted sizing: higher score = larger position
             qty = calc_position_size_weighted(account, cand["currentPrice"], cand["score"], all_scores)
             if qty < 1: qty = 1
 

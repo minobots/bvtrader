@@ -988,7 +988,7 @@ def check_signals():
 # ─────────────────────────────────────────────────────────────────────────────
 # LIBRARY BUILDER — bulk scoring (no daily limit)
 # ─────────────────────────────────────────────────────────────────────────────
-DAILY_BUILD_COUNT = 80  # 80 × ~2s = ~160s max (fits cron 120s timeout with margin)
+DAILY_BUILD_COUNT = 40  # 40 × ~2s = ~80s max (fits cron 120s timeout with margin)
 
 def build_library():
     """
@@ -1042,7 +1042,7 @@ def build_library():
         except Exception as e:
             errors.append(f"{sym}: {e}")
             print(f"✗ {e}")
-        time.sleep(1.5)  # be polite to Yahoo
+        time.sleep(0.3)  # be polite to Yahoo
 
     return scored, errors
 
