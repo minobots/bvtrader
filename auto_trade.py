@@ -364,22 +364,6 @@ def calc_position_size(account, price, max_pct=0.10):
         qty = max(1, int(100 / price))
     return qty
 
-# ── Re-entry Cooldown ─────────────────────────────────────────────────────────
-_COOLDOWN_DAYS = 5  # skip BUY if symbol was sold within last 5 trading days
-
-def _get_recent_sells():
-    """Return set of symbols sold within _COOLDOWN_DAYS trading days via Alpaca."""
-    try:
-        since = (datetime.now() - timedelta(days=_COOLDOWN_DAYS+2)).strftime("%Y-%m-%d")
-        url = f"https://paper-api.alpaca.markets/v2/orders?status=filled&after={since}&limit=100"
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        if resp.status_code != 200:
-            return set()
-        orders = resp.json()
-        return {o["symbol"] for o in orders if o.get("side") == "sell" and o.get("status") == "filled"}
-    except Exception:
-        return set()
-
 # ── Core Trading Logic ────────────────────────────────────────────────────────
 MAX_POSITIONS = 20      # max open positions
 MAX_ORDERS    = 5       # max new orders per run
@@ -549,11 +533,25 @@ def run_trade_cycle():
 
         if best_candidate["score"] - worst["score"] >= ROTATION_THRESHOLD:
             log.append(f"  🔁 ROTATING: {worst['symbol']} (score={worst['score']:.1f}, {worst['pl_pct']*100:.1f}%) → {best_candidate['symbol']} (score={best_candidate['score']:.1f})")
-            # Close worst position
             qty = int(float(worst["qty"]))
             result = place_order(worst["symbol"], qty, "sell")
             if result.get("success"):
                 actions_taken.append(f"ROTATE OUT {worst['symbol']}")
+                # Record rotation sell in signals table so engine can't re-buy immediately
+                try:
+                    db_path = os.path.expanduser("~/.hermes/cron/output/wealth/portfolio.db")
+                    conn_rot = sqlite3.connect(db_path)
+                    conn_rot.execute("""
+                        INSERT INTO signals (symbol, signal_date, signal_type, trigger_rule,
+                        trigger_detail, score_before, price_at_signal, conviction, status)
+                        VALUES (?, ?, 'sell', 'auto_trade_rotation',
+                        'Rotated out by engine — portfolio manager controls re-entry', ?, ?, 'high', 'active')
+                    """, (worst["symbol"], datetime.now().strftime("%Y-%m-%d"),
+                          worst["score"], worst.get("current_price", 0)))
+                    conn_rot.commit()
+                    conn_rot.close()
+                except Exception:
+                    pass  # don't fail the trade if DB write fails
                 log.append(f"    → Sold {qty} shares @ ${worst.get('current_price', '?')}")
                 slots_available = 1
             else:
@@ -583,13 +581,30 @@ def run_trade_cycle():
     log.append(f"  Slots available: {slots_available} (max {MAX_POSITIONS} positions, {len(positions)} open, {len(pending_buys)} pending)")
     log.append(f"  Slots available: {slots_available} (max {MAX_POSITIONS} positions, {len(positions)} open, {len(pending_buys)} pending)")
 
+    # ── Step 6b: Get portfolio-manager rotated symbols ──────────────────────
+    # The portfolio manager (check_signals) rotates out symbols when composite score < 40.
+    # The day trading engine should NOT re-buy those symbols on momentum — only the
+    # portfolio manager can signal re-entry. This prevents the conflict where the
+    # portfolio manager sells at $106 (earnings quality collapse) and the engine
+    # immediately buys at $109 (momentum bounce).
+    rotated_syms = set()
+    try:
+        db_path = os.path.expanduser("~/.hermes/cron/output/wealth/portfolio.db")
+        conn_rot = sqlite3.connect(db_path)
+        cutoff = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
+        rows = conn_rot.execute(
+            "SELECT symbol FROM signals WHERE signal_type='sell' AND status='active' AND signal_date >= ?",
+            (cutoff,)).fetchall()
+        rotated_syms = {r["symbol"] for r in rows}
+        conn_rot.close()
+    except Exception:
+        pass  # don't block trades if DB check fails
+
     if slots_available <= 0:
         log.append("  ⏭️ Max positions reached — no new entries")
     else:
-        # Fetch recently sold symbols — block re-entry for cooldown period
-        recently_sold = _get_recent_sells()
-        if recently_sold:
-            log.append(f"  🛡️ Cooldown: {len(recently_sold)} symbols blocked from buy: {sorted(recently_sold)}")
+        if rotated_syms:
+            log.append(f"  🚫 Portfolio manager rotated: {sorted(rotated_syms)}")
 
         new_buys = 0
         scored_symbols = [s for s in scored if s["score"] > 0]
@@ -602,8 +617,8 @@ def run_trade_cycle():
             sym = cand["symbol"]
             if sym in open_syms or sym in pending_buys:
                 log.append(f"  ⏭️ {sym} already have/pending — skipped"); continue
-            if sym in recently_sold:
-                log.append(f"  ⛔ {sym} sold recently — cooldown block, skipped"); continue
+            if sym in rotated_syms:
+                log.append(f"  🚫 {sym} in portfolio manager rotation list — skip momentum buy"); continue
             if cand["currentPrice"] == 0:
                 log.append(f"  ⏭️ {sym} no price data — skipped"); continue
 
