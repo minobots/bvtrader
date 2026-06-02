@@ -456,6 +456,12 @@ def run_trade_cycle():
 
     actions_taken = []
 
+    # ── In-cycle rotation memory ──────────────────────────────────────────────
+    # Tracks symbols rotated OUT in THIS cycle so engine can't re-buy them
+    # even if the DB INSERT fails (IndexError → `except: pass`).
+    # Cleared each run; survives within the same run's EXIT→ROTATION→ENTRY chain.
+    this_cycle_rotated_out = set()
+
     # ── Step 3: Exit Logic — Stop-Loss & Take-Profit ─────────────────────────
     log.append(f"\n🔚 EXIT CHECK:")
     for p in positions:
@@ -554,6 +560,7 @@ def run_trade_cycle():
             result = place_order(worst["symbol"], qty, "sell")
             if result.get("success"):
                 actions_taken.append(f"ROTATE OUT {worst['symbol']}")
+                this_cycle_rotated_out.add(worst["symbol"])
                 # Record rotation sell in signals table so engine can't re-buy immediately
                 try:
                     db_path = os.path.expanduser("~/.hermes/cron/output/wealth/portfolio.db")
@@ -562,7 +569,8 @@ def run_trade_cycle():
                         INSERT INTO signals (symbol, signal_date, signal_type, trigger_rule,
                         trigger_detail, score_before, price_at_signal, conviction, status)
                         VALUES (?, ?, 'sell', 'auto_trade_rotation',
-                        'Rotated out by engine — portfolio manager controls re-entry', ?, ?, 'high', 'active')
+                        'Rotated out by engine — portfolio manager controls re-entry',
+                        ?, ?, 'high', 'active')
                     """, (worst["symbol"], datetime.now().strftime("%Y-%m-%d"),
                           worst["score"], worst.get("current_price", 0)))
                     conn_rot.commit()
@@ -576,14 +584,22 @@ def run_trade_cycle():
         else:
             log.append(f"  ⏭️ No rotation: best candidate {best_candidate['symbol']} ({best_candidate['score']:.1f}) vs worst position {worst['symbol']} ({worst['score']:.1f}) — gap {best_candidate['score']-worst['score']:.1f} < threshold {ROTATION_THRESHOLD}")
 
-    # ── Step 5: Cancel Stale Orders ──────────────────────────────────────────
+    # ── Step 5: Cancel Stale Orders + Rotated-Out Buys ──────────────────────
     log.append(f"\n📋 ORDER CLEANUP:")
     for o in pending:
+        sym = o["symbol"]
         age_mins = (datetime.now() - datetime.fromisoformat(o["created_at"].replace("Z",""))).total_seconds()/60
-        if age_mins > 60:
-            log.append(f"  🗑️ Cancelling stale order: {o['symbol']} {o['side']} {o['qty']} (age: {age_mins:.0f}min)")
+        # Cancel if stale (>60 min) OR if it's a pending buy for a symbol we just rotated out
+        if sym in this_cycle_rotated_out:
+            log.append(f"  🗑️ Cancelling rotated-out buy: {sym} {o['side']} {o['qty']}")
             if cancel_order(o["id"]):
-                actions_taken.append(f"CANCEL {o['symbol']}")
+                actions_taken.append(f"CANCEL {sym} (rotation)")
+            else:
+                log.append(f"    → Failed to cancel")
+        elif age_mins > 60:
+            log.append(f"  🗑️ Cancelling stale order: {sym} {o['side']} {o['qty']} (age: {age_mins:.0f}min)")
+            if cancel_order(o["id"]):
+                actions_taken.append(f"CANCEL {sym}")
             else:
                 log.append(f"    → Failed to cancel")
 
@@ -635,6 +651,8 @@ def run_trade_cycle():
                 log.append(f"  ⏭️ {sym} already have/pending — skipped"); continue
             if sym in rotated_syms:
                 log.append(f"  🚫 {sym} in portfolio manager rotation list — skip momentum buy"); continue
+            if sym in this_cycle_rotated_out:
+                log.append(f"  ⛔ {sym} rotated out in THIS cycle — skip re-buy"); continue
             if cand["currentPrice"] == 0:
                 log.append(f"  ⏭️ {sym} no price data — skipped"); continue
 
