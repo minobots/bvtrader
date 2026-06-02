@@ -531,7 +531,24 @@ def run_trade_cycle():
         worst = scored_positions[0]
         best_candidate = buy_candidates[0]
 
-        if best_candidate["score"] - worst["score"] >= ROTATION_THRESHOLD:
+        # ── Guard: skip if this symbol already has an active rotation sell ──────
+        # Prevents the sell-then-immediate-buy loop if DB write failed earlier
+        db_rotated = set()
+        try:
+            db_path = os.path.expanduser("~/.hermes/cron/output/wealth/portfolio.db")
+            conn_chk = sqlite3.connect(db_path)
+            cutoff = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
+            rows = conn_chk.execute(
+                "SELECT symbol FROM signals WHERE trigger_rule='auto_trade_rotation' AND signal_type='sell' AND status='active' AND signal_date >= ?",
+                (cutoff,)).fetchall()
+            db_rotated = {r["symbol"] for r in rows}
+            conn_chk.close()
+        except Exception:
+            pass
+
+        if worst["symbol"] in db_rotated:
+            log.append(f"  ⏭️ {worst['symbol']} already has active rotation sell — skip rotation")
+        elif best_candidate["score"] - worst["score"] >= ROTATION_THRESHOLD:
             log.append(f"  🔁 ROTATING: {worst['symbol']} (score={worst['score']:.1f}, {worst['pl_pct']*100:.1f}%) → {best_candidate['symbol']} (score={best_candidate['score']:.1f})")
             qty = int(float(worst["qty"]))
             result = place_order(worst["symbol"], qty, "sell")
@@ -578,7 +595,6 @@ def run_trade_cycle():
     pending_buys = {o["symbol"] for o in pending if o["side"]=="buy"}
     slots_available = MAX_POSITIONS - len(positions) - len(pending_buys)
 
-    log.append(f"  Slots available: {slots_available} (max {MAX_POSITIONS} positions, {len(positions)} open, {len(pending_buys)} pending)")
     log.append(f"  Slots available: {slots_available} (max {MAX_POSITIONS} positions, {len(positions)} open, {len(pending_buys)} pending)")
 
     # ── Step 6b: Get portfolio-manager rotated symbols ──────────────────────
